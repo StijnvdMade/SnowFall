@@ -68,8 +68,23 @@ void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
 
   bool isMonitoring = true;
-  double crashThreshold = 40.0; // +- 4G krachten
   
+  final initPrefs = await SharedPreferences.getInstance();
+  await initPrefs.reload();
+  double crashThreshold = initPrefs.getDouble('crashThreshold') ?? 40.0;
+  int cooldownTime = initPrefs.getInt('cooldownTime') ?? 10;
+  
+  service.on('updateSettings').listen((event) {
+    if (event != null) {
+      if (event['crashThreshold'] != null) {
+        crashThreshold = event['crashThreshold'];
+      }
+      if (event['cooldownTime'] != null) {
+        cooldownTime = event['cooldownTime'];
+      }
+    }
+  });
+
   List<TrackedPoint> recentPositions = [];
   Timer? routeSaveTimer;
 
@@ -131,7 +146,7 @@ void onStart(ServiceInstance service) async {
       await registerCrash(gForce, speed2SecAgo);
       
       // Cooldown timer
-      Timer(const Duration(seconds: 10), () {
+      Timer(Duration(seconds: cooldownTime), () {
         isMonitoring = true;
       });
     }
@@ -191,6 +206,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isTracking = false;
   List<Map<String, dynamic>> _crashes = [];
   Timer? _refreshTimer;
+  String _activityType = 'snowboard';
 
   @override
   void initState() {
@@ -221,8 +237,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload(); 
     List<String> rawCrashes = prefs.getStringList('crash_history') ?? [];
+    String activityType = prefs.getString('activityType') ?? 'snowboard';
     setState(() {
       _crashes = rawCrashes.map((e) => jsonDecode(e) as Map<String, dynamic>).toList();
+      _activityType = activityType;
     });
   }
   
@@ -265,6 +283,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
         title: const Text('Snowboard Tracker'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen())).then((_) {
+                 _loadCrashes();
+              });
+            },
+            tooltip: 'Instellingen',
+          ),
+          IconButton(
             icon: const Icon(Icons.delete_forever),
             onPressed: _clearEverything,
             tooltip: 'Wis Sessie',
@@ -284,7 +311,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 30),
             child: Column(
               children: [
-                const Icon(Icons.downhill_skiing, size: 80, color: Colors.orange),
+                Icon(_activityType == 'ski' ? Icons.downhill_skiing : Icons.snowboarding, size: 80, color: Colors.orange),
                 const SizedBox(height: 20),
                 Text(
                   'Totale vallen: ${_crashes.length}',
@@ -443,6 +470,150 @@ class _MapScreenState extends State<MapScreen> {
         polylines: _polylines,
         markers: _markers,
         myLocationEnabled: true,
+      ),
+    );
+  }
+}
+
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  double _crashThreshold = 40.0;
+  int _cooldown = 10;
+  String _activityType = 'snowboard';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _crashThreshold = prefs.getDouble('crashThreshold') ?? 40.0;
+      _cooldown = prefs.getInt('cooldownTime') ?? 10;
+      _activityType = prefs.getString('activityType') ?? 'snowboard';
+    });
+  }
+
+  Future<void> _saveSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('crashThreshold', _crashThreshold);
+    await prefs.setInt('cooldownTime', _cooldown);
+    await prefs.setString('activityType', _activityType);
+    
+    final service = FlutterBackgroundService();
+    if (await service.isRunning()) {
+      service.invoke('updateSettings', {
+        'crashThreshold': _crashThreshold,
+        'cooldownTime': _cooldown,
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Instellingen'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: ListView(
+          children: [
+            const Text(
+               'Val Gevoeligheid (m/s²)', 
+               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)
+            ),
+            const SizedBox(height: 8),
+            Text(
+               'Huidige drempelwaarde: ${_crashThreshold.toStringAsFixed(1)} m/s²\n(Lager = gevoeliger, Hoger = minder gevoelig)',
+               style: const TextStyle(color: Colors.grey)
+            ),
+            Slider(
+              value: _crashThreshold,
+              min: 10.0,
+              max: 100.0,
+              divisions: 90,
+              label: _crashThreshold.toStringAsFixed(1),
+              onChanged: (value) {
+                setState(() {
+                  _crashThreshold = value;
+                });
+              },
+              onChangeEnd: (value) {
+                _saveSettings();
+              },
+            ),
+            const Divider(height: 32),
+            const Text(
+               'Cooldown Tijd (seconden)', 
+               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)
+            ),
+            const SizedBox(height: 8),
+            Text(
+               'Tijd wachten na een val voordat er weer gemeten wordt: $_cooldown seconden',
+               style: const TextStyle(color: Colors.grey)
+            ),
+            Slider(
+              value: _cooldown.toDouble(),
+              min: 2.0,
+              max: 60.0,
+              divisions: 58,
+              label: _cooldown.toString(),
+              onChanged: (value) {
+                setState(() {
+                  _cooldown = value.toInt();
+                });
+              },
+              onChangeEnd: (value) {
+                _saveSettings();
+              },
+            ),
+            const Divider(height: 32),
+            const Text(
+               'Icoon Weergave', 
+               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: RadioListTile<String>(
+                    title: const Text('Snowboard'),
+                    value: 'snowboard',
+                    groupValue: _activityType,
+                    onChanged: (value) {
+                      setState(() {
+                        _activityType = value!;
+                      });
+                      _saveSettings();
+                    },
+                  ),
+                ),
+                Expanded(
+                  child: RadioListTile<String>(
+                    title: const Text('Ski'),
+                    value: 'ski',
+                    groupValue: _activityType,
+                    onChanged: (value) {
+                      setState(() {
+                        _activityType = value!;
+                      });
+                      _saveSettings();
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
